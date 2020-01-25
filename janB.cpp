@@ -4,7 +4,7 @@
 #include<fstream>
 #include<string>
 #include<omp.h>
-//#include<mpi.h>
+#include<mpi.h>
 
 using namespace std;
 
@@ -137,6 +137,7 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
             } 
         }
         */
+        
         //
         //UPDATE PHI
         //
@@ -189,6 +190,74 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
     return iter;
 }
 
+int omp(int N,double w,double a,double b,double x1,double y1,double q1,double x2,double y2,double q2)
+{
+    
+    vector<vector<double>> phi(N, vector<double> (N,0)); //electrostatic potential
+    vector<vector<double>> rho(N, vector<double> (N,0)); //charge density
+    vector<vector<double>> U(N, vector<double> (N,0)); //matrix used to iterate phi
+    
+    //intialize charge density
+    //nearest grid point to x1 is round(x1*(N-1)/a) (similar for x2, y1, y2)
+    //charge density at nearest grid point to a point charge is q/N*N
+    //but rho only appears multiplied by N^2, so use q instead, and drop the N^2 later
+    rho[round(x1*(N-1)/a)][round(y1*(N-1)/b)]=q1;
+    rho[round(x2*(N-1)/a)][round(y2*(N-1)/b)]=q2;
+    
+    
+    int iter =0;
+    //iterate pot until phi_new=phi_old
+    while(true)
+    {
+        
+        
+        //
+        //CALC U
+        //
+        
+        //calculate U which is used to update phi
+        //exclude end points as edges grounded so phi=0
+        #pragma omp parallel for default(none) private() shared(equal) reduction()
+        for(int i=1;i<N-1;i++)
+        {
+            for(int j=1;j<N-1;j++)
+            {
+                
+                U[i][j]=0.25*(phi[i+1][j]+phi[i-1][j]+phi[i][j+1]+phi[i][j-1]+rho[i][j]);
+            }
+        }
+
+        //
+        //UPDATE PHI
+        //
+        int equal=1;//this will stay 1 if phi doesnt change with iteration
+        //otherwise, update phi        
+        
+        #pragma omp parallel for default(none) private() shared(equal) reduction()
+        for(int i=0;i<N;i++)
+        {
+            for(int j=0;j<N;j++)
+            {
+                
+                if(dEqual(U[i][j],phi[i][j]))
+                {
+                    continue;
+                }
+                phi[i][j]=phi[i][j]+w*(U[i][j]-phi[i][j]);
+                equal=0;
+            }
+        }
+        
+        
+        //
+        //EXIT STUFF
+        //
+        if(equal)
+        {
+            cout<<"equilib reached, after "<<iter<<" Iterations.\n";
+            fileOut(phi,"phi");
+            break;
+        }
 
 
 int openMP(int N,double w,double a,double b,double x1,double y1,double q1,double x2,double y2,double q2)
@@ -230,12 +299,13 @@ int openMP(int N,double w,double a,double b,double x1,double y1,double q1,double
     }
     return 0;
 }
-/*
+
 int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2,double y2,double q2)
 {
     vector<vector<double>> phi(N, vector<double> (N,0)); //electrostatic potential
     vector<vector<double>> rho(N, vector<double> (N,0)); //charge density
     vector<vector<double>> U(N, vector<double> (N,0)); //matrix used to iterate phi
+    
     
     //intialize charge density
     //nearest grid point to x1 is round(x1*(N-1)/a) (similar for x2, y1, y2)
@@ -245,17 +315,13 @@ int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2
     rho[round(x2*(N-1)/a)][round(y2*(N-1)/b)]=q2;
     
     int ierr;
+    MPI_Init (&argc, &argv); //parallel section
     
     
-
-    MPI_Init (&argc, &argv);
-    
-    int myRank;
-    int size;
+    int myRank; //rank of processor
+    int size; //number of processors
     MPI_Comm_rank(MPI_COMM_WORLD,&myRank);
     MPI_Comm_size(MPI_COMM_WORLD,&size);
-    
-    
     
     //index that each thread starts/ends on (using 1D decomposition)
     int istart = myRank * N/size;
@@ -266,13 +332,16 @@ int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2
     if(iend==N) iend=N-1;
     
     
-    //loop until convergence (when U=phi)
+    //loop until convergence (happens when U=phi)
     while(true)
     {
-        //update U
+        ////////////
+        //update U//
+        ////////////
+        
         for(int i=istart;i<iend;i++)
         {
-            for(int j=1;j<N-1;j++)
+            for(int j=1;j<N-1;j++)//the edges (j=0,N) are grounded (phi=0) so dont change them 
             {
                 
                 U[i][j]=0.25*(phi[i+1][j]+phi[i-1][j]+phi[i][j+1]+phi[i][j-1]+rho[i][j]);
@@ -286,7 +355,6 @@ int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2
         {
             for(int j=1;j<N-1;j++)
             {
-                
                 if(dEqual(U[i][j],phi[i][j]))
                 {
                     continue;
@@ -296,26 +364,144 @@ int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2
             }
         }
         
-        
-        
-        
         ierr=MPI_barrier(MPI_COMM_WORLD);
             
         
-        //sync equal
+        ///////////////////////////////////////////////////////////////////////////////////////////
+        //sync equal. iff all equals are 1, then convergence found, output phi and exit while loop//
+        ///////////////////////////////////////////////////////////////////////////////////////////
+
+        //equal = 1 iff all processor's equal = 1. otherwise, equal = 0.
+        int globalEqual;
+        ierr=MPI_Allreduce(&equal,&globalEqual,1,MPI_INT,MPI_PROD,MPI_COMM_WORLD);
+        equal=globalEqual;  
+
+        if(equal)
+        {
+            //each processor has a different phi, with phi[i][j] = 0 except inbetween istart-1 and iend-1 (inclusive). 
+            //so could use global reduce with addition, but istart-1 from one processor overlaps with iend-1 from the previous one
+            
+            //so set phi[istart-1][j] = 0 to fix this
+            if(myRank!=0) //but dont do this for first processor
+            {                
+                for(int j=0;j<N;j++)
+                {
+                    phi[istart-1][j]=0.0;
+                }
+            }
+            ierr=MPI_barrier(MPI_COMM_WORLD);
+            
+            //now no overlap between different processors phi, so reduce.
+            vector<vector<double>> globalPhi(N, vector<double> (N,0));
+            ierr=MPI_ALLreduce(&phi[0][0],&globalPhi[0][0],N*N,MPI_DOUBLE,MPI_SUM,MPI_COMM_WORLD);
+            for(int i=0; i<N;i++);
+            {
+                for(int j=0;j<N;j++)
+                {
+                    phi[i][j]=globalPhi[i][j];
+                }
+            }
+            
+            break;     
+        }
         
-        //if equal, exit stuff
         
-        //sync phi 
-            //only need to send phi info at edges
+        ///////////////////////////////////////////////////////////////////////
+        //if convergence not found, sync phi (only need to sync phi at edges)//
+        ///////////////////////////////////////////////////////////////////////
         
-        for(int j 
+        //even thread send end (high i) of thread's phi grid, odd thread recieve 
+        if(not(myRank%2))//if myRank even
+        {
+            if(myRank!=size-1) //last thread shouldnt send anything
+            {
+                //send end of my grid to thread myRank + 1
+                ierr=MPI_Send(&phi[iend-1][0],N,MPI_DOUBLE,myRank+1,myRank,MPI_COMM_WORLD);
+            }
+        }
+        else //if myRank odd
+        {
+            if(myRank!=0) //first thread shouldnt recieve anything
+            {
+                //recieve from myRank -1
+                ierr=MPI_Recv(&phi[istart-1][0],N,MPI_DOUBLE,myRank-1,myRank-1,MPI_COMM_WORLD);
+            }
+        }
+        ierr=MPI_barrier(MPI_COMM_WORLD);
+        
+        //odd thread send end (high i) of phi grid, even thread recieve
+        if(myRank%2) // if myRank odd
+        {
+            if(myRank!=size-1) //last thread shouldnt send anything
+            {
+                //send end of my grid to thread myRank + 1
+                ierr=MPI_Send(&phi[iend-1][0],N,MPI_DOUBLE,myRank+1,myRank,MPI_COMM_WORLD);
+            }
+        }
+        else //if myRank even
+        {
+            
+            if(myRank!=0) //first thread shouldnt recieve anything
+            {
+                //recieve from myRank -1
+                ierr=MPI_Recv(&phi[istart-1][0],N,MPI_DOUBLE,myRank-1,myRank-1,MPI_COMM_WORLD);
+            }
+        }
+        ierr=MPI_barrier(MPI_COMM_WORLD);
+        
+        
+        //
+        //do the same but for the start (low i) of the phi grid
+        //
+        
+        
+        //even thread send start (low i) of thread's phi grid, odd thread recieve 
+        if(not(myRank%2))//if myRank even
+        {
+            if(myRank!=0) //first thread shouldnt send anything
+            {
+                //send start of my grid to thread myRank - 1
+                ierr=MPI_Send(&phi[istart][0],N,MPI_DOUBLE,myRank-1,myRank,MPI_COMM_WORLD);
+            }
+        }
+        else //if myRank odd
+        {
+            if(myRank!=size-1) //last thread shouldnt recieve anything
+            {
+                //recieve from myRank + 1
+                ierr=MPI_Recv(&phi[iend][0],N,MPI_DOUBLE,myRank+1,myRank+1,MPI_COMM_WORLD);
+            }
+        }
+        ierr=MPI_barrier(MPI_COMM_WORLD);
+        
+        //odd thread send start (low i) of thread's phi grid, even thread recieve 
+        if(myRank%2)//if myRank odd
+        {
+            if(myRank!=0) //first thread shouldnt send anything
+            {
+                //send start of my grid to thread myRank - 1
+                ierr=MPI_Send(&phi[istart][0],N,MPI_DOUBLE,myRank-1,myRank,MPI_COMM_WORLD);
+            }
+        }
+        else //if myRank even
+        {
+            if(myRank!=size-1) //last thread shouldnt recieve anything
+            {
+                //recieve from myRank + 1
+                ierr=MPI_Recv(&phi[iend][0],N,MPI_DOUBLE,myRank+1,myRank+1,MPI_COMM_WORLD);
+            }
+        }        
+        ierr=MPI_barrier(MPI_COMM_WORLD);
+        
     }
         
         
     MPI_Finalise();
+    
+    cout<<"equib reached.\n";
+    fileOut(phi,"phiMPI");
 }
-   */ 
+
 
 
 
