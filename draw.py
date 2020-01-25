@@ -7,10 +7,10 @@ import numpy as np
 #
 
 N=100#int(sys.argv[1])
-iter=int(sys.argv[1])
+#iter=int(sys.argv[1])
 
 finwin=GraphWin("box",1000,1000)
-finwin.setBackground("white")
+finwin.setBackground("black")
 
 
         

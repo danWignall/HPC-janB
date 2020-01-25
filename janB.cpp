@@ -3,20 +3,22 @@
 #include<vector>
 #include<fstream>
 #include<string>
+#include<omp.h>
+//#include<mpi.h>
 
 using namespace std;
 
 
-//prelim value for comparing doubles
-double epsilon = 1e-6;
+//value for comparing doubles
+double epsilon = 1e-8;
 int dEqual(double a, double b)
 {
-    //return fabs(a-b)<epsilon;
     if(a==b)
     {
-        return 1;
+        return 1; //catch the trivial case where the doubles are literally equal
     }
-    return (fabs(a - b) <= ( (fabs(a) < fabs(b) ? fabs(b) : fabs(a)) * epsilon ))or fabs(a-b)<epsilon;
+    //if not, see if they are equal within tolerance
+    return (fabs(a - b) <= ( (fabs(a) < fabs(b) ? fabs(b) : fabs(a)) * epsilon ));//or fabs(a-b)<epsilon;
 }
 //checks if two matrices are equal
 int matrixEqual(vector<vector<double>> A,vector<vector<double>> B)
@@ -48,7 +50,6 @@ void printMatrix(vector<vector<double>> M)
 	}
     cout<<"\n";
 }
-
 //outputs a file in the format for draw.py 
 //and a file in the format for draw1000.py
 //assumes N is a power of 10
@@ -107,6 +108,12 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
     //iterate pot until phi_new=phi_old
     while(true)
     {
+        
+        
+        //
+        //CALC U
+        //
+        
         //calculate U which is used to update phi
         //exclude end points as edges grounded so phi=0
         for(int i=1;i<N-1;i++)
@@ -117,8 +124,6 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
                 U[i][j]=0.25*(phi[i+1][j]+phi[i-1][j]+phi[i][j+1]+phi[i][j-1]+rho[i][j]);
             }
         }
-        
-
         /*
         //if U=phi_old, then w(U-phi_old)=0 and convergence found
         //only check every 100 loops, to save time
@@ -132,13 +137,16 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
             } 
         }
         */
-        
+        //
+        //UPDATE PHI
+        //
         int equal=1;//this will stay 1 if phi doesnt change with iteration
         //otherwise, update phi        
         for(int i=0;i<N;i++)
         {
             for(int j=0;j<N;j++)
             {
+                
                 if(dEqual(U[i][j],phi[i][j]))
                 {
                     continue;
@@ -148,6 +156,10 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
             }
         }
         
+        
+        //
+        //EXIT STUFF
+        //
         if(equal)
         {
             cout<<"equilib reached, after "<<iter<<" Iterations.\n";
@@ -179,18 +191,141 @@ int serial(int N,double w,double a,double b,double x1,double y1,double q1,double
 
 
 
+int openMP(int N,double w,double a,double b,double x1,double y1,double q1,double x2,double y2,double q2)
+{
+    vector<vector<double>> phi(N, vector<double> (N,0)); //electrostatic potential
+    vector<vector<double>> rho(N, vector<double> (N,0)); //charge density
+    vector<vector<double>> U(N, vector<double> (N,0)); //matrix used to iterate phi
+    
+    //intialize charge density
+    //nearest grid point to x1 is round(x1*(N-1)/a) (similar for x2, y1, y2)
+    //charge density at nearest grid point to a point charge is q/N*N
+    //but rho only appears multiplied by N^2, so use q instead, and drop the N^2 later
+    rho[round(x1*(N-1)/a)][round(y1*(N-1)/b)]=q1;
+    rho[round(x2*(N-1)/a)][round(y2*(N-1)/b)]=q2;
+    
+    //this will stay 1 iff convergence found
+    int equal=1;
+    
+    //switch the order of for and while loops so that only incur cost of parallelisation once, this means that will need syncronisation at the end of while loop so that processors stay in same iteration
+    //this introduces an issue: cant update U[i][j] unless all surrounding phi[i][j] are also updated, otherwise could be adding together phi components from different iterations
+    //to get around this, loop through the grid edges first, with barriers.
+    #pragma omp parallel for default(none) private() shared(equal) reduction()
+    for(int i=0;i<N;i++)
+    {
+        
+        for(int j=0;j<N;j++)
+        {
+            while(true)
+            {
+                U[i][j]=0.25*(phi[i+1][j]+phi[i-1][j]+phi[i][j+1]+phi[i][j-1]+rho[i][j]);
+                
+                phi[i][j]=phi[i][j]+w*(U[i][j]-phi[i][j]);
+                
+                #pragma omp barrier
+                
+                //exit stuff
+            }
+        }
+    }
+    return 0;
+}
+/*
+int MPI(int N,double w,double a,double b,double x1,double y1,double q1,double x2,double y2,double q2)
+{
+    vector<vector<double>> phi(N, vector<double> (N,0)); //electrostatic potential
+    vector<vector<double>> rho(N, vector<double> (N,0)); //charge density
+    vector<vector<double>> U(N, vector<double> (N,0)); //matrix used to iterate phi
+    
+    //intialize charge density
+    //nearest grid point to x1 is round(x1*(N-1)/a) (similar for x2, y1, y2)
+    //charge density at nearest grid point to a point charge is q/N*N
+    //but rho only appears multiplied by N^2, so use q instead, and drop the N^2 later
+    rho[round(x1*(N-1)/a)][round(y1*(N-1)/b)]=q1;
+    rho[round(x2*(N-1)/a)][round(y2*(N-1)/b)]=q2;
+    
+    int ierr;
+    
+    
 
+    MPI_Init (&argc, &argv);
+    
+    int myRank;
+    int size;
+    MPI_Comm_rank(MPI_COMM_WORLD,&myRank);
+    MPI_Comm_size(MPI_COMM_WORLD,&size);
+    
+    
+    
+    //index that each thread starts/ends on (using 1D decomposition)
+    int istart = myRank * N/size;
+    int iend = istart+N/size;
+    
+    //the edges are grounded (phi=0) so dont change them 
+    if(istart==0) istart=1; 
+    if(iend==N) iend=N-1;
+    
+    
+    //loop until convergence (when U=phi)
+    while(true)
+    {
+        //update U
+        for(int i=istart;i<iend;i++)
+        {
+            for(int j=1;j<N-1;j++)
+            {
+                
+                U[i][j]=0.25*(phi[i+1][j]+phi[i-1][j]+phi[i][j+1]+phi[i][j-1]+rho[i][j]);
+            }
+        }
+        
+        int equal=1;//this will stay 1 if phi doesnt change with iteration
+        
+        //check if U[i][j] == phi[i][j], update phi[i][j] when it doesnt
+        for(int i=istart;i<iend;i++)
+        {
+            for(int j=1;j<N-1;j++)
+            {
+                
+                if(dEqual(U[i][j],phi[i][j]))
+                {
+                    continue;
+                }
+                phi[i][j]=phi[i][j]+w*(U[i][j]-phi[i][j]);
+                equal=0;
+            }
+        }
+        
+        
+        
+        
+        ierr=MPI_barrier(MPI_COMM_WORLD);
+            
+        
+        //sync equal
+        
+        //if equal, exit stuff
+        
+        //sync phi 
+            //only need to send phi info at edges
+        
+        for(int j 
+    }
+        
+        
+    MPI_Finalise();
+}
+   */ 
 
 
 
 int main(int argc, char *argv[])
 {
-    int N=stoi(argv[1]);
+    int N=100;
     double w=1;
     int iter;
     
     //N, w, a, b, x1,y1,q1, x2,y2,q2
-    iter=serial(N,w,1,1,0.55,0.5,1,0.45,0.5,-1);
-    
-    return iter;
+    serial(N,w,1,1,0.5,0.5,1,0.6,0.4,2);
+
 }
