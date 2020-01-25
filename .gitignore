@@ -1,2 +1,5 @@
 *.dat
 .*.dat
+a.out
+*.exe
+pythonScripts
