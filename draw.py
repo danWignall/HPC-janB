@@ -1,4 +1,5 @@
 from graphics import *
+from Tkinter import *
 import sys
 import numpy as np
 
@@ -14,8 +15,8 @@ finwin.setBackground("black")
 
 
         
-        
-pot=np.loadtxt("phi.dat")
+fileName=sys.argv[1]
+pot=np.loadtxt(fileName+".dat")
 
 ##rescale potential
 mx=0.0 #max absolute value of pot, used to rescale down to [0,255] for colours
@@ -25,12 +26,13 @@ for row in pot:
     row[2]=255*row[2]/mx
 
 
-#create list of points to colour (only colour points with non zero pot)
+#create list of points to colour
+cutoff=-100000 #(to save time, only colour points with pot >= cutoff)
 p=[]
 for i in range(0,N):
     for j in range(0,N):
         #print pot[i+N*j]
-        if(abs(pot[i+N*j][2])>10):
+        if(abs(pot[i+N*j][2])>=cutoff):
             p.append(pot[i+N*j])
 
 r=[]       
@@ -38,6 +40,7 @@ for i in range(0,len(p)):
     r.append(Rectangle(Point(p[i][0]*10,p[i][1]*10),Point(p[i][0]*10+10,p[i][1]*10+10)))
     r[i].setWidth(0)
     r[i].setFill(color_rgb(max(0.0,p[i][2]),0,-min(0.0,p[i][2])))
+    r[i].setOutline(color_rgb(max(0.0,p[i][2]),0,-min(0.0,p[i][2])))
     r[i].draw(finwin)
 
 """
@@ -57,8 +60,15 @@ for row in pot:
     
 
 """
+# saves the current TKinter object in postscript format
+finwin.postscript(file="image.eps")#, colormode='color')
 
-finwin.getMouse() # Pause to view result
+# Convert from eps format to gif format using PIL
+from PIL import Image as NewImage
+finwin = NewImage.open("image.eps")
+finwin.save(fileName+".gif", "gif")
+
+#finwin.getMouse() # Pause to view result
 
 
                     
